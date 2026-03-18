@@ -11,7 +11,7 @@ app.get("/cicd",(req,res)=>{
 })
 
 app.get("/again",(req,res)=>{
-    return res.send("New Routes to check CI-CD")
+    return res.send("content changes")
 })
 app.listen(PORT,()=>{
     console.log(`Server is running on http://localhost:${PORT}`)
