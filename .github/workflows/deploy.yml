@@ -20,24 +20,30 @@ jobs:
           node-version: "20.13.1"
           cache: "npm"
 
-      - name: Install dependencies (for validation only)
+      - name: Install dependencies (check only)
         run: npm install
 
       - name: Create deployment package
         run: |
           mkdir -p deploy
-          cp -r src deploy/  # or your JS files root
+
+          # Copy actual project files
+          cp index.js deploy/
           cp package*.json deploy/
-          cp ecosystem.config.cjs deploy/
-          [ -f .env.example ] && cp .env.example deploy/ || echo "No .env.example found"
+          cp ecosystem.config.cjs deploy/ || echo "No PM2 config found"
+          cp Dockerfile deploy/ || echo "No Dockerfile"
+          cp docker-compose.yml deploy/ || echo "No docker-compose"
+
+          # Optional env
+          [ -f .env.example ] && cp .env.example deploy/ || echo "No .env.example"
+
           tar -czf deploy.tar.gz -C deploy .
 
-      - name: Upload build artifact
+      - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
           name: deployment-package
           path: deploy.tar.gz
-          retention-days: 1
 
   deploy:
     name: Deploy to EC2
@@ -45,79 +51,73 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Download build artifact
+      - name: Download artifact
         uses: actions/download-artifact@v4
         with:
           name: deployment-package
 
-      - name: Deploy to EC2 via SSH
+      - name: Deploy via SSH
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
           EC2_USERNAME: ${{ secrets.EC2_USERNAME }}
           SSH_PRIVATE_KEY: ${{ secrets.EC2_SSH_KEY }}
         run: |
-          echo "$SSH_PRIVATE_KEY" > private_key.pem
-          chmod 600 private_key.pem
+          echo "$SSH_PRIVATE_KEY" > key.pem
+          chmod 600 key.pem
 
-          scp -i private_key.pem -o StrictHostKeyChecking=no \
-            deploy.tar.gz ${EC2_USERNAME}@${EC2_HOST}:/tmp/
+          scp -i key.pem -o StrictHostKeyChecking=no deploy.tar.gz ${EC2_USERNAME}@${EC2_HOST}:/tmp/
 
-          ssh -i private_key.pem -o StrictHostKeyChecking=no \
-            ${EC2_USERNAME}@${EC2_HOST} << 'EOF'
+          ssh -i key.pem -o StrictHostKeyChecking=no ${EC2_USERNAME}@${EC2_HOST} << 'EOF'
 
-            cd /var/www/express-app
+            cd /var/www/express-app || mkdir -p /var/www/express-app && cd /var/www/express-app
 
             sudo chown -R $USER:$USER /var/www/express-app
 
-            # Backup current version
-            if [ -d "src" ]; then
-              timestamp=$(date +%Y%m%d_%H%M%S)
+            # Backup
+            if [ -f "index.js" ]; then
               mkdir -p backups
-              tar -czf backups/backup_${timestamp}.tar.gz src package.json ecosystem.config.cjs .env 2>/dev/null || true
-              ls -t backups/backup_*.tar.gz 2>/dev/null | tail -n +6 | xargs -r rm
+              timestamp=$(date +%Y%m%d_%H%M%S)
+              tar -czf backups/backup_$timestamp.tar.gz . 2>/dev/null || true
+              ls -t backups/*.tar.gz | tail -n +6 | xargs -r rm
             fi
 
-            # Extract new version
+            # Extract new code
             tar --overwrite -xzf /tmp/deploy.tar.gz -C /var/www/express-app
             rm /tmp/deploy.tar.gz
 
-            sudo chown -R $USER:$USER /var/www/express-app
-
-            echo "Installing dependencies..."
+            # Install dependencies
             npm ci --production
 
-            # Create .env if not exists
+            # Create env
             if [ ! -f .env ]; then
               echo "NODE_ENV=production" > .env
               echo "PORT=8080" >> .env
             fi
 
-            mkdir -p logs
-
-            # PM2 reload/start
+            # PM2 restart
             if pm2 describe express-app > /dev/null 2>&1; then
-              sudo pm2 reload ecosystem.config.cjs --update-env
+              pm2 reload ecosystem.config.cjs --update-env || pm2 restart express-app
             else
-              sudo pm2 start ecosystem.config.cjs
+              pm2 start index.js --name express-app
             fi
 
-            sudo pm2 save
+            pm2 save
 
           EOF
 
-          rm private_key.pem
+          rm key.pem
 
       - name: Verify deployment
         env:
           EC2_HOST: ${{ secrets.EC2_HOST }}
         run: |
-          sleep 10
+          echo "Checking app..."
 
-          for i in {1..2}; do
-            response=$(curl -s -o /dev/null -w "%{http_code}" http://${EC2_HOST} || echo "000")
+          for i in {1..3}; do
+            code=$(curl -s -o /dev/null -w "%{http_code}" http://${EC2_HOST} || echo 000)
 
-            if [ "$response" = "200" ] || [ "$response" = "301" ] || [ "$response" = "302" ]; then
-              echo "✅ Deployment successful!"
+            if [ "$code" = "200" ] || [ "$code" = "301" ] || [ "$code" = "302" ]; then
+              echo "✅ Success ($code)"
               exit 0
             fi
 
