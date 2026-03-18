@@ -13,6 +13,11 @@ app.get("/cicd",(req,res)=>{
 app.get("/again",(req,res)=>{
     return res.send("reflected here")
 })
+
+app.get("/tested",(req,res)=>{
+    return res.send("tested ci-cd is working")
+})
+
 app.listen(PORT,()=>{
     console.log(`Server is running on http://localhost:${PORT}`)
 })
